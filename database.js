@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { nanoid } from 'nanoid';
+import { runMigrations, getMigrationStatus } from './migrations.js';
 
 const { Pool } = pg;
 
@@ -10,50 +11,28 @@ const pool = new Pool({
 
 export async function initDatabase() {
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS url_mappings (
-        id VARCHAR(10) PRIMARY KEY,
-        notion_url TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        access_count INTEGER DEFAULT 0,
-        last_accessed TIMESTAMP
-      )
-    `);
+    // Check migration status
+    const status = await getMigrationStatus(pool);
+    console.log('Migration status:', {
+      initialized: status.initialized,
+      applied: status.applied?.length || 0,
+      pending: status.pending?.length || 0
+    });
     
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS head_configs (
-        id SERIAL PRIMARY KEY,
-        config_type VARCHAR(20) NOT NULL,
-        page_id VARCHAR(10),
-        snippet TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+    // Run any pending migrations
+    const migrationsRun = await runMigrations(pool);
     
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS tracking (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        type VARCHAR(10) NOT NULL CHECK (type IN ('email', 'page')),
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        user_agent TEXT,
-        ip VARCHAR(45),
-        referer TEXT,
-        page_id VARCHAR(10),
-        FOREIGN KEY (page_id) REFERENCES url_mappings(id) ON DELETE CASCADE
-      )
-    `);
+    if (migrationsRun > 0) {
+      console.log(`Database updated with ${migrationsRun} migrations`);
+    } else {
+      console.log('Database schema is up to date');
+    }
     
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_tracking_name ON tracking(name);
-      CREATE INDEX IF NOT EXISTS idx_tracking_type ON tracking(type);
-      CREATE INDEX IF NOT EXISTS idx_tracking_timestamp ON tracking(timestamp);
-    `);
-    
-    console.log('Database tables initialized');
+    return true;
   } catch (error) {
     console.error('Database initialization error:', error);
     console.log('Running in fallback mode without database');
+    throw error;
   }
 }
 
@@ -81,16 +60,71 @@ export async function getMapping(id) {
   }
 }
 
-export async function createMapping(notionUrl, customId = null) {
+export async function createMapping(notionUrl, customId = null, path = null) {
   const id = customId || nanoid(10);
   try {
     await pool.query(
-      'INSERT INTO url_mappings (id, notion_url) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET notion_url = $2',
-      [id, notionUrl]
+      'INSERT INTO url_mappings (id, notion_url, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET notion_url = $2, path = $3',
+      [id, notionUrl, path]
     );
     return id;
   } catch (error) {
     console.error('Error creating mapping:', error);
+    return null;
+  }
+}
+
+export async function getMappingByPath(path) {
+  try {
+    const result = await pool.query(
+      'SELECT id, notion_url FROM url_mappings WHERE path = $1',
+      [path]
+    );
+    return result.rows[0] || null;
+  } catch (error) {
+    console.error('Error getting mapping by path:', error);
+    return null;
+  }
+}
+
+export async function getRootMapping() {
+  try {
+    const result = await pool.query(
+      'SELECT id, notion_url FROM url_mappings WHERE is_root = TRUE LIMIT 1'
+    );
+    return result.rows[0] || null;
+  } catch (error) {
+    console.error('Error getting root mapping:', error);
+    return null;
+  }
+}
+
+export async function setRootMapping(notionUrl) {
+  try {
+    // First, unset any existing root
+    await pool.query('UPDATE url_mappings SET is_root = FALSE WHERE is_root = TRUE');
+    
+    // Check if this URL already has a mapping
+    const existing = await pool.query('SELECT id FROM url_mappings WHERE notion_url = $1', [notionUrl]);
+    
+    if (existing.rows.length > 0) {
+      // Update existing mapping to be root
+      await pool.query(
+        'UPDATE url_mappings SET is_root = TRUE, path = $2 WHERE notion_url = $1',
+        [notionUrl, '/']
+      );
+      return existing.rows[0].id;
+    } else {
+      // Create new mapping as root
+      const id = nanoid(10);
+      await pool.query(
+        'INSERT INTO url_mappings (id, notion_url, is_root, path) VALUES ($1, $2, TRUE, $3)',
+        [id, notionUrl, '/']
+      );
+      return id;
+    }
+  } catch (error) {
+    console.error('Error setting root mapping:', error);
     return null;
   }
 }
@@ -278,6 +312,92 @@ export async function autoDiscoverFromEnv() {
         console.log(`Auto-registered: ${url} -> ${id}`);
       }
     }
+  }
+}
+
+// Asset cache functions
+export async function getCachedAsset(url) {
+  try {
+    // First clean up expired entries
+    await pool.query('DELETE FROM asset_cache WHERE expires_at < CURRENT_TIMESTAMP');
+    
+    const result = await pool.query(
+      `SELECT content_type, content, headers 
+       FROM asset_cache 
+       WHERE url = $1 AND expires_at > CURRENT_TIMESTAMP`,
+      [url]
+    );
+    
+    if (result.rows.length > 0) {
+      // Update hit count
+      await pool.query(
+        'UPDATE asset_cache SET hit_count = hit_count + 1 WHERE url = $1',
+        [url]
+      );
+      
+      return {
+        contentType: result.rows[0].content_type,
+        content: result.rows[0].content,
+        headers: result.rows[0].headers,
+        cached: true
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting cached asset:', error);
+    return null;
+  }
+}
+
+export async function setCachedAsset(url, contentType, content, headers) {
+  try {
+    await pool.query(
+      `INSERT INTO asset_cache (url, content_type, content, headers, expires_at) 
+       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + INTERVAL '5 minutes')
+       ON CONFLICT (url) DO UPDATE SET 
+         content_type = $2,
+         content = $3,
+         headers = $4,
+         cached_at = CURRENT_TIMESTAMP,
+         expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes'`,
+      [url, contentType, content, JSON.stringify(headers)]
+    );
+    
+    return true;
+  } catch (error) {
+    console.error('Error caching asset:', error);
+    return false;
+  }
+}
+
+export async function getCacheStats() {
+  try {
+    const stats = await pool.query(`
+      SELECT 
+        COUNT(*) as total_cached,
+        SUM(hit_count) as total_hits,
+        SUM(LENGTH(content)) as total_size,
+        MIN(cached_at) as oldest_cache,
+        MAX(cached_at) as newest_cache
+      FROM asset_cache
+      WHERE expires_at > CURRENT_TIMESTAMP
+    `);
+    
+    return stats.rows[0];
+  } catch (error) {
+    console.error('Error getting cache stats:', error);
+    return null;
+  }
+}
+
+export async function clearCache() {
+  try {
+    const result = await pool.query('DELETE FROM asset_cache');
+    return result.rowCount;
+  } catch (error) {
+    console.error('Error clearing cache:', error);
+    return 0;
   }
 }
 

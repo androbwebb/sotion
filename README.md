@@ -11,6 +11,8 @@ A proxy service for Notion pages with HEAD injection, URL obfuscation, and auto-
 - 💾 **Persistent Storage**: PostgreSQL database for reliable storage across restarts
 - 📊 **Analytics**: Tracks access counts and last accessed time for each page
 - 🔄 **Notion API Integration**: Discover entire workspaces or specific databases
+- ⚡ **5-Minute Caching**: All content cached for improved performance
+- 🔧 **Database Migrations**: Proper schema versioning and migrations
 
 ## Setup
 
@@ -64,6 +66,8 @@ A proxy service for Notion pages with HEAD injection, URL obfuscation, and auto-
 - `POST /register` - Manually register a new Notion URL
 - `GET /list` - List all registered URLs with analytics
 - `GET /health` - Health check endpoint
+- `GET /cache/stats` - View cache statistics
+- `POST /cache/clear` - Clear cache (protected with CACHE_ADMIN_KEY env var)
 
 ## Local Development
 
@@ -78,6 +82,9 @@ cp .env.example .env
 # 2. Create a database called 'sotion'
 # 3. Set DATABASE_URL in .env file
 DATABASE_URL=postgresql://user:password@localhost:5432/sotion
+
+# Run database migrations:
+npm run migrate
 
 # Add your root page and discovery options:
 ROOT_NOTION_PAGE=https://andrewwebb.notion.site/Irina-2524e71be63880238e6bfdc6479f86b7
@@ -98,3 +105,64 @@ npm run dev
 3. Copy the integration token
 4. Share your Notion pages/databases with the integration
 5. Add the token as `NOTION_TOKEN` environment variable
+
+## Database Migrations
+
+The service uses a migration system to manage database schema changes:
+
+```bash
+# Run all pending migrations
+npm run migrate
+
+# Check migration status
+npm run migrate:status
+
+# Rollback last migration
+npm run migrate:rollback
+
+# Or use the CLI directly:
+node migrate.js up                    # Run all pending migrations
+node migrate.js status                # Check migration status
+node migrate.js rollback              # Rollback last migration
+node migrate.js rollback 001_initial  # Rollback specific migration
+```
+
+### Creating New Migrations
+
+1. Create a new file in `/migrations` with the naming pattern `XXX_description.js`
+2. Export `up` and `down` functions:
+
+```javascript
+export const up = async (pool) => {
+  await pool.query(`
+    CREATE TABLE example (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255)
+    )
+  `);
+};
+
+export const down = async (pool) => {
+  await pool.query('DROP TABLE IF EXISTS example');
+};
+```
+
+3. Run `npm run migrate` to apply
+
+## Caching
+
+The service includes a 5-minute cache for all proxied content:
+
+- **Automatic**: All JS, CSS, HTML, and images are cached
+- **Headers**: Check `X-Cache` header for HIT/MISS status
+- **Stats**: View cache statistics at `/cache/stats`
+- **Clear**: Clear cache via `/cache/clear` (set `CACHE_ADMIN_KEY` for protection)
+
+```bash
+# Optional: Set admin key for cache management
+CACHE_ADMIN_KEY=your-secret-key
+
+# Clear cache with curl:
+curl -X POST http://localhost:3000/cache/clear \
+  -H "X-Admin-Key: your-secret-key"
+```
