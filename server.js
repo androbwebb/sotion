@@ -16,7 +16,10 @@ import {
   getCachedAsset,
   setCachedAsset,
   getCacheStats,
-  clearCache
+  clearCache,
+  getMappingByPath,
+  getRootMapping,
+  setRootMapping
 } from './database.js';
 import { initNotionClient, autoDiscoverViaAPI } from './notion-api.js';
 
@@ -41,6 +44,12 @@ async function initialize() {
       // Initialize Notion API and discover pages
       if (initNotionClient()) {
         await autoDiscoverViaAPI();
+      }
+      
+      // Set up root mapping if configured
+      if (process.env.ROOT_NOTION_PAGE) {
+        await setRootMapping(process.env.ROOT_NOTION_PAGE);
+        console.log(`Root mapping set: / -> ${process.env.ROOT_NOTION_PAGE}`);
       }
       
       headConfig = await getHeadConfigs();
@@ -93,15 +102,25 @@ function autoDiscoverFromMemory() {
 
 // Endpoint to register a new Notion page and get obfuscated URL
 app.post('/register', async (req, res) => {
-  const { notionUrl } = req.body;
+  const { notionUrl, path, isRoot } = req.body;
   
   if (!notionUrl) {
     return res.status(400).json({ error: 'notionUrl is required' });
   }
   
+  // Validate path if provided
+  if (path && !path.startsWith('/')) {
+    return res.status(400).json({ error: 'Path must start with /' });
+  }
+  
   let id;
   if (usingDatabase) {
-    id = await createMapping(notionUrl);
+    // If marking as root, use setRootMapping
+    if (isRoot) {
+      id = await setRootMapping(notionUrl);
+    } else {
+      id = await createMapping(notionUrl, null, path);
+    }
     if (!id) {
       return res.status(500).json({ error: 'Failed to create mapping' });
     }
@@ -110,10 +129,20 @@ app.post('/register', async (req, res) => {
     fallbackUrlMap.set(id, notionUrl);
   }
   
-  res.json({ 
+  const response = {
     id,
-    proxyUrl: `${req.protocol}://${req.get('host')}/p/${id}`
-  });
+    legacyUrl: `${req.protocol}://${req.get('host')}/p/${id}`
+  };
+  
+  if (path) {
+    response.transparentUrl = `${req.protocol}://${req.get('host')}${path}`;
+  }
+  
+  if (isRoot) {
+    response.transparentUrl = `${req.protocol}://${req.get('host')}/`;
+  }
+  
+  res.json(response);
 });
 
 // Helper function to detect MIME type from path
@@ -456,7 +485,7 @@ app.get('/proxy/asset', async (req, res) => {
   }
 });
 
-// Proxy endpoint with obfuscated URL
+// Legacy proxy endpoint with obfuscated URL (kept for backward compatibility)
 app.get('/p/:id', async (req, res) => {
   const { id } = req.params;
   
@@ -479,197 +508,9 @@ app.get('/p/:id', async (req, res) => {
       referer: req.get('referer'),
       pageId: id
     });
-  } else {
-    // Fallback tracking
-    if (!fallbackTracking.has(id)) {
-      fallbackTracking.set(id, { page: [] });
-    }
-    const tracking = fallbackTracking.get(id);
-    if (!tracking.page) tracking.page = [];
-    tracking.page.push({
-      timestamp: new Date().toISOString(),
-      userAgent: req.get('user-agent'),
-      ip: req.ip || req.connection.remoteAddress,
-      referer: req.get('referer')
-    });
   }
   
-  try {
-    // Check cache first for HTML pages
-    const cacheKey = `page:${id}`;
-    if (usingDatabase) {
-      const cached = await getCachedAsset(cacheKey);
-      if (cached) {
-        console.log(`Cache HIT: Page ${id}`);
-        res.set('Content-Type', 'text/html; charset=utf-8');
-        res.set('X-Cache', 'HIT');
-        return res.send(cached.content);
-      }
-    }
-    
-    console.log(`Cache MISS: Page ${id}`);
-    
-    // Fetch the Notion page
-    const response = await fetch(notionUrl);
-    const html = await response.text();
-    
-    // Parse HTML with Cheerio
-    const $ = cheerio.load(html);
-    
-    // Rewrite asset URLs to use our proxy
-    // Handle script tags
-    $('script[src]').each((i, elem) => {
-      const src = $(elem).attr('src');
-      if (src) {
-        if (src.includes('notion.so/_assets/') || src.includes('notion.site/_assets/')) {
-          // Extract just the _assets path
-          const assetPath = src.substring(src.indexOf('/_assets/'));
-          $(elem).attr('src', assetPath);
-        } else if (src.includes('notion.so/assets/') || src.includes('notion.site/assets/')) {
-          // Extract just the assets path (without underscore)
-          const assetPath = src.substring(src.indexOf('/assets/'));
-          $(elem).attr('src', assetPath);
-        } else if (src.startsWith('https://') && (src.includes('amazonaws.com') || src.includes('notion'))) {
-          // Proxy external CDN assets
-          $(elem).attr('src', `/proxy/asset?url=${encodeURIComponent(src)}`);
-        } else if (src.startsWith('/_assets/') || src.startsWith('/assets/')) {
-          // Already relative, leave as is
-        }
-      }
-    });
-    
-    // Handle link tags (CSS)
-    $('link[href]').each((i, elem) => {
-      const href = $(elem).attr('href');
-      if (href) {
-        if (href.includes('notion.so/_assets/') || href.includes('notion.site/_assets/')) {
-          // Extract just the _assets path
-          const assetPath = href.substring(href.indexOf('/_assets/'));
-          $(elem).attr('href', assetPath);
-        } else if (href.includes('notion.so/assets/') || href.includes('notion.site/assets/')) {
-          // Extract just the assets path (without underscore)
-          const assetPath = href.substring(href.indexOf('/assets/'));
-          $(elem).attr('href', assetPath);
-        } else if (href.startsWith('https://') && (href.includes('amazonaws.com') || href.includes('notion'))) {
-          // Proxy external CDN assets
-          $(elem).attr('href', `/proxy/asset?url=${encodeURIComponent(href)}`);
-        } else if (href.startsWith('/_assets/') || href.startsWith('/assets/')) {
-          // Already relative, leave as is
-        }
-      }
-    });
-    
-    // Handle image tags
-    $('img[src]').each((i, elem) => {
-      const src = $(elem).attr('src');
-      if (src) {
-        if (src.includes('notion.so/_assets/') || src.includes('notion.site/_assets/')) {
-          // Extract just the _assets path
-          const assetPath = src.substring(src.indexOf('/_assets/'));
-          $(elem).attr('src', assetPath);
-        } else if (src.includes('notion.so/assets/') || src.includes('notion.site/assets/')) {
-          // Extract just the assets path (without underscore)
-          const assetPath = src.substring(src.indexOf('/assets/'));
-          $(elem).attr('src', assetPath);
-        } else if (src.startsWith('https://') && (src.includes('amazonaws.com') || src.includes('notion'))) {
-          // Proxy external CDN assets
-          $(elem).attr('src', `/proxy/asset?url=${encodeURIComponent(src)}`);
-        } else if (src.startsWith('/_assets/') || src.startsWith('/assets/')) {
-          // Already relative, leave as is
-        }
-      }
-    });
-    
-    // Handle inline styles with url() references
-    $('[style]').each((i, elem) => {
-      const style = $(elem).attr('style');
-      if (style && style.includes('url(')) {
-        let newStyle = style;
-        // Match url() patterns
-        const urlMatches = style.match(/url\(['"]?(https?:\/\/[^'"\)]+)['"]?\)/g);
-        if (urlMatches) {
-          urlMatches.forEach(match => {
-            const url = match.match(/url\(['"]?(https?:\/\/[^'"\)]+)['"]?\)/)[1];
-            if (url && (url.includes('amazonaws.com') || url.includes('notion'))) {
-              newStyle = newStyle.replace(match, `url('/proxy/asset?url=${encodeURIComponent(url)}')`);
-            }
-          });
-          $(elem).attr('style', newStyle);
-        }
-      }
-    });
-    
-    // Auto-discover and register linked Notion pages
-    if (process.env.AUTO_DISCOVER_LINKS === 'true') {
-      const notionLinks = new Set();
-      
-      // Find all Notion links
-      $('a[href*="notion.so"], a[href*="notion.site"]').each((i, elem) => {
-        const href = $(elem).attr('href');
-        if (href && (href.includes('notion.so') || href.includes('notion.site'))) {
-          // Clean up the URL
-          const cleanUrl = href.split('?')[0].split('#')[0];
-          notionLinks.add(cleanUrl);
-        }
-      });
-      
-      // Register discovered links
-      for (const link of notionLinks) {
-        if (usingDatabase) {
-          const existingMappings = await getAllMappings();
-          const exists = existingMappings.some(m => m.notion_url === link);
-          if (!exists) {
-            const newId = await createMapping(link);
-            if (newId) {
-              console.log(`Auto-discovered link: ${link} -> ${newId}`);
-              // Replace the link in the HTML
-              const newProxyUrl = `/p/${newId}`;
-              $(`a[href="${link}"]`).attr('href', newProxyUrl);
-            }
-          } else {
-            // Replace with existing proxy URL
-            const existing = existingMappings.find(m => m.notion_url === link);
-            if (existing) {
-              $(`a[href="${link}"]`).attr('href', `/p/${existing.id}`);
-            }
-          }
-        }
-      }
-    }
-    
-    // Add global snippets to HEAD
-    headConfig.globalSnippets?.forEach(snippet => {
-      $('head').append(snippet);
-    });
-    
-    // Add page-specific snippets if configured
-    const pageSnippets = headConfig.pageSpecificSnippets?.[id];
-    if (pageSnippets) {
-      pageSnippets.forEach(snippet => {
-        $('head').append(snippet);
-      });
-    }
-    
-    // Get the modified HTML
-    const modifiedHtml = $.html();
-    
-    // Cache the modified HTML if database is available
-    if (usingDatabase) {
-      const cacheKey = `page:${id}`;
-      await setCachedAsset(cacheKey, 'text/html; charset=utf-8', Buffer.from(modifiedHtml), {});
-      console.log(`Cached page: ${id}`);
-    }
-    
-    // Add cache miss header
-    res.set('X-Cache', 'MISS');
-    res.set('Content-Type', 'text/html; charset=utf-8');
-    
-    // Send modified HTML
-    res.send(modifiedHtml);
-  } catch (error) {
-    console.error('Error fetching Notion page:', error);
-    res.status(500).send('Error loading page');
-  }
+  return proxyNotionPage(notionUrl, req, res);
 });
 
 // List all registered URLs
@@ -681,7 +522,10 @@ app.get('/list', async (req, res) => {
     entries = mappings.map(row => ({
       id: row.id,
       notionUrl: row.notion_url,
-      proxyUrl: `${req.protocol}://${req.get('host')}/p/${row.id}`,
+      path: row.path || null,
+      isRoot: row.is_root || false,
+      legacyUrl: `${req.protocol}://${req.get('host')}/p/${row.id}`,
+      transparentUrl: row.path ? `${req.protocol}://${req.get('host')}${row.path}` : null,
       created: row.created_at,
       accessCount: row.access_count,
       lastAccessed: row.last_accessed
@@ -762,54 +606,137 @@ app.post('/cache/clear', async (req, res) => {
 });
 
 // Root endpoint - redirect to root page if configured, otherwise show info
-app.get('/', async (req, res) => {
-  // Check if ROOT_NOTION_PAGE is configured
-  const rootPage = process.env.ROOT_NOTION_PAGE;
-  
-  if (rootPage) {
-    // Check if this page is already registered
-    let rootId = null;
+// Helper function to proxy a Notion page
+async function proxyNotionPage(notionUrl, req, res) {
+  // Check cache first for HTML content
+  if (usingDatabase) {
+    const cached = await getCachedAsset(notionUrl);
+    if (cached) {
+      res.set('X-Cache', 'HIT');
+      res.set('Content-Type', cached.contentType || 'text/html');
+      return res.send(cached.content);
+    }
+  }
+  res.set('X-Cache', 'MISS');
+
+  try {
+    console.log(`Fetching Notion page: ${notionUrl}`);
+    const response = await fetch(notionUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+      }
+    });
+
+    if (!response.ok) {
+      return res.status(response.status).send(`Failed to fetch page: ${response.statusText}`);
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
     
+    // Remove any existing Notion analytics or tracking
+    $('script[src*="analytics"]').remove();
+    $('script[src*="gtag"]').remove();
+    $('script[src*="segment"]').remove();
+    
+    // Rewrite all Notion asset URLs to use our proxy
+    $('script[src], link[href]').each((i, elem) => {
+      const $elem = $(elem);
+      const attrName = elem.name === 'script' ? 'src' : 'href';
+      const originalUrl = $elem.attr(attrName);
+      
+      if (originalUrl) {
+        // Handle different Notion asset URL patterns
+        if (originalUrl.startsWith('https://www.notion.so/_assets/')) {
+          const assetPath = originalUrl.replace('https://www.notion.so/_assets/', '');
+          $elem.attr(attrName, `/_assets/${assetPath}`);
+        } else if (originalUrl.includes('notion.site/assets/')) {
+          const match = originalUrl.match(/notion\.site\/assets\/(.+)/);
+          if (match) {
+            $elem.attr(attrName, `/assets/${match[1]}`);
+          }
+        } else if (originalUrl.includes('amazonaws.com')) {
+          // Proxy S3 assets through our /proxy/asset endpoint
+          $elem.attr(attrName, `/proxy/asset?url=${encodeURIComponent(originalUrl)}`);
+        }
+      }
+    });
+    
+    // Also handle img src attributes
+    $('img[src]').each((i, elem) => {
+      const $elem = $(elem);
+      const originalUrl = $elem.attr('src');
+      
+      if (originalUrl && (originalUrl.includes('amazonaws.com') || originalUrl.includes('notion.so'))) {
+        $elem.attr('src', `/proxy/asset?url=${encodeURIComponent(originalUrl)}`);
+      }
+    });
+    
+    // Add custom head snippets
+    if (headConfig) {
+      // Add global snippets
+      if (headConfig.globalSnippets && headConfig.globalSnippets.length > 0) {
+        const globalSnippet = headConfig.globalSnippets.join('\n');
+        $('head').append(globalSnippet);
+      }
+      
+      // Add page-specific snippets if available
+      const pageId = req.params.id || req.path;
+      if (headConfig.pageSpecificSnippets && headConfig.pageSpecificSnippets[pageId]) {
+        const pageSnippet = headConfig.pageSpecificSnippets[pageId].join('\n');
+        $('head').append(pageSnippet);
+      }
+    }
+    
+    const modifiedHtml = $.html();
+    res.send(modifiedHtml);
+    
+    // Cache the modified HTML if database is available
     if (usingDatabase) {
-      const mappings = await getAllMappings();
-      const existing = mappings.find(m => m.notion_url === rootPage);
-      if (existing) {
-        rootId = existing.id;
-      } else {
-        // Register the root page
-        rootId = await createMapping(rootPage);
-        console.log(`Registered root page: ${rootPage} -> ${rootId}`);
-      }
-    } else {
-      // Check in-memory map
-      const existing = Array.from(fallbackUrlMap.entries()).find(([_, url]) => url === rootPage);
-      if (existing) {
-        rootId = existing[0];
-      } else {
-        // Register in memory
-        rootId = Math.random().toString(36).substring(2, 12);
-        fallbackUrlMap.set(rootId, rootPage);
-        console.log(`Registered root page (memory): ${rootPage} -> ${rootId}`);
-      }
+      await setCachedAsset(notionUrl, 'text/html', Buffer.from(modifiedHtml), { 'content-type': 'text/html' });
+      console.log(`Cached HTML for: ${notionUrl}`);
     }
-    
-    if (rootId) {
-      // Redirect to the proxied root page
-      return res.redirect(`/p/${rootId}`);
+  } catch (error) {
+    console.error('Error fetching Notion page:', error);
+    res.status(500).send('Error loading page');
+  }
+}
+
+// Root route - proxy the configured root page
+app.get('/', async (req, res) => {
+  if (usingDatabase) {
+    const rootMapping = await getRootMapping();
+    if (rootMapping) {
+      return proxyNotionPage(rootMapping.notion_url, req, res);
     }
+  }
+  
+  // Fallback for in-memory mode or no root mapping
+  const rootPage = process.env.ROOT_NOTION_PAGE;
+  if (rootPage) {
+    return proxyNotionPage(rootPage, req, res);
   }
   
   // Default info response if no root page configured
   res.json({
     service: 'Notion Proxy',
     endpoints: {
-      'GET /p/:id': 'Access proxied Notion page',
-      'POST /register': 'Register a Notion URL',
+      'GET /*': 'Access proxied Notion pages by path',
+      'GET /p/:id': 'Legacy: Access proxied Notion page by ID',
+      'POST /register': 'Register a Notion URL with optional path',
       'GET /list': 'List all registered URLs',
-      'GET /health': 'Health check'
+      'GET /health': 'Health check',
+      'GET /cache/stats': 'View cache statistics',
+      'POST /cache/clear': 'Clear the cache'
     },
     database: usingDatabase ? 'PostgreSQL' : 'In-memory (not persistent)',
-    rootPage: rootPage ? 'Configured (redirecting...)' : 'Not configured'
+    rootPage: rootPage ? 'Not configured' : 'Not configured'
   });
 });
 
@@ -857,6 +784,34 @@ app.get('/pixel/:name', async (req, res) => {
   });
   
   res.end(pixel);
+});
+
+// Catch-all route for transparent path-based routing
+app.get('/*', async (req, res) => {
+  const path = req.path;
+  
+  // Skip API and asset routes
+  if (path.startsWith('/_assets/') || 
+      path.startsWith('/assets/') || 
+      path.startsWith('/proxy/') ||
+      path.startsWith('/p/') ||
+      path.startsWith('/pixel/') ||
+      path === '/list' ||
+      path === '/health' ||
+      path === '/cache' ||
+      path === '/register') {
+    return res.status(404).send('Not found');
+  }
+  
+  if (usingDatabase) {
+    const mapping = await getMappingByPath(path);
+    if (mapping) {
+      return proxyNotionPage(mapping.notion_url, req, res);
+    }
+  }
+  
+  // No mapping found
+  res.status(404).send('Page not found');
 });
 
 // Start server
