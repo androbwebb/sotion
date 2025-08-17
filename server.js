@@ -665,6 +665,8 @@ async function proxyNotionPage(notionUrl, req, res) {
           // Proxy S3 assets through our /proxy/asset endpoint
           $elem.attr(attrName, `/proxy/asset?url=${encodeURIComponent(originalUrl)}`);
         }
+        // Relative URLs starting with / are now handled by the catch-all route
+        // No need to rewrite them
       }
     });
     
@@ -803,6 +805,50 @@ app.get('/*', async (req, res) => {
     return res.status(404).send('Not found');
   }
   
+  // Check if this is a static asset (CSS, JS, JSON, images, fonts, etc.)
+  const mimeType = getMimeType(path);
+  if (mimeType) {
+    // Proxy static assets directly to Notion
+    const notionAssetUrl = `https://www.notion.so${path}`;
+    
+    try {
+      // Check cache first if database is available
+      if (usingDatabase) {
+        const cached = await getCachedAsset(notionAssetUrl);
+        if (cached) {
+          console.log(`Cache HIT: ${path}`);
+          res.set('Content-Type', cached.contentType || mimeType);
+          res.set('X-Cache', 'HIT');
+          return res.send(cached.content);
+        }
+      }
+      
+      console.log(`Cache MISS: ${path} - Proxying to Notion`);
+      const response = await fetch(notionAssetUrl);
+      
+      if (!response.ok) {
+        return res.status(response.status).send(`Asset not found: ${response.statusText}`);
+      }
+      
+      const buffer = await response.buffer();
+      res.set('Content-Type', mimeType);
+      res.set('X-Cache', 'MISS');
+      res.set('Cache-Control', 'public, max-age=300');
+      res.send(buffer);
+      
+      // Cache the asset if database is available
+      if (usingDatabase) {
+        await setCachedAsset(notionAssetUrl, mimeType, buffer, { 'content-type': mimeType });
+        console.log(`Cached asset: ${path}`);
+      }
+    } catch (error) {
+      console.error(`Error proxying asset ${path}:`, error);
+      return res.status(500).send('Error loading asset');
+    }
+    return;
+  }
+  
+  // For non-static assets (HTML pages), check database mappings
   if (usingDatabase) {
     const mapping = await getMappingByPath(path);
     if (mapping) {
