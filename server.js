@@ -152,26 +152,42 @@ app.get('/_assets/*', async (req, res) => {
       return res.status(response.status).send(`Asset not found: ${response.statusText}`);
     }
     
-    // Detect content type from the file extension or response headers
+    // Pass through the content type from the original response
     let contentType = response.headers.get('content-type');
-    if (!contentType || contentType === 'text/html') {
-      // Override incorrect MIME types
+    
+    // Only override if the content type is clearly wrong (text/html for JS/CSS files)
+    if (contentType === 'text/html' || contentType === 'text/plain') {
       const detectedType = getMimeType(assetPath);
       if (detectedType) {
+        console.log(`Overriding incorrect MIME type ${contentType} with ${detectedType} for ${assetPath}`);
         contentType = detectedType;
       }
     }
     
-    // Set proper headers
-    if (contentType) {
-      res.set('Content-Type', contentType);
-    }
+    // Pass through all relevant headers from the original response
+    const headersToPass = [
+      'content-type',
+      'content-length',
+      'content-encoding',
+      'cache-control',
+      'etag',
+      'last-modified',
+      'expires',
+      'vary',
+      'access-control-allow-origin',
+      'access-control-allow-methods',
+      'access-control-allow-headers'
+    ];
     
-    // Copy other important headers
-    ['cache-control', 'etag', 'last-modified', 'access-control-allow-origin'].forEach(header => {
+    headersToPass.forEach(header => {
       const value = response.headers.get(header);
       if (value) {
-        res.set(header, value);
+        // Special handling for content-type if we overrode it
+        if (header === 'content-type' && contentType !== response.headers.get('content-type')) {
+          res.set(header, contentType);
+        } else {
+          res.set(header, value);
+        }
       }
     });
     
@@ -196,26 +212,42 @@ app.get('/assets/*', async (req, res) => {
       return res.status(response.status).send(`Asset not found: ${response.statusText}`);
     }
     
-    // Detect content type from the file extension or response headers
+    // Pass through the content type from the original response
     let contentType = response.headers.get('content-type');
-    if (!contentType || contentType === 'text/html') {
-      // Override incorrect MIME types
+    
+    // Only override if the content type is clearly wrong
+    if (contentType === 'text/html' || contentType === 'text/plain') {
       const detectedType = getMimeType(req.path);
       if (detectedType) {
+        console.log(`Overriding incorrect MIME type ${contentType} with ${detectedType} for ${req.path}`);
         contentType = detectedType;
       }
     }
     
-    // Set proper headers
-    if (contentType) {
-      res.set('Content-Type', contentType);
-    }
+    // Pass through all relevant headers from the original response
+    const headersToPass = [
+      'content-type',
+      'content-length',
+      'content-encoding',
+      'cache-control',
+      'etag',
+      'last-modified',
+      'expires',
+      'vary',
+      'access-control-allow-origin',
+      'access-control-allow-methods',
+      'access-control-allow-headers'
+    ];
     
-    // Copy other important headers
-    ['cache-control', 'etag', 'last-modified', 'access-control-allow-origin'].forEach(header => {
+    headersToPass.forEach(header => {
       const value = response.headers.get(header);
       if (value) {
-        res.set(header, value);
+        // Special handling for content-type if we overrode it
+        if (header === 'content-type' && contentType !== response.headers.get('content-type')) {
+          res.set(header, contentType);
+        } else {
+          res.set(header, value);
+        }
       }
     });
     
@@ -259,25 +291,39 @@ app.get('/proxy/asset', async (req, res) => {
       return res.status(response.status).send(`Asset not found: ${response.statusText}`);
     }
     
-    // Detect content type
+    // Pass through the content type from the original response
     let contentType = response.headers.get('content-type');
-    if (!contentType || contentType === 'text/html') {
+    
+    // Only override if the content type is clearly wrong
+    if (contentType === 'text/html' || contentType === 'text/plain') {
       const detectedType = getMimeType(assetUrl);
       if (detectedType) {
+        console.log(`Overriding incorrect MIME type ${contentType} with ${detectedType} for external asset`);
         contentType = detectedType;
       }
     }
     
-    // Set proper headers
-    if (contentType) {
-      res.set('Content-Type', contentType);
-    }
+    // Pass through all relevant headers from the original response
+    const headersToPass = [
+      'content-type',
+      'content-length',
+      'content-encoding',
+      'cache-control',
+      'etag',
+      'last-modified',
+      'expires',
+      'vary'
+    ];
     
-    // Copy other important headers
-    ['cache-control', 'etag', 'last-modified'].forEach(header => {
+    headersToPass.forEach(header => {
       const value = response.headers.get(header);
       if (value) {
-        res.set(header, value);
+        // Special handling for content-type if we overrode it
+        if (header === 'content-type' && contentType !== response.headers.get('content-type')) {
+          res.set(header, contentType);
+        } else {
+          res.set(header, value);
+        }
       }
     });
     
