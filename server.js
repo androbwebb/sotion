@@ -165,10 +165,10 @@ app.get('/_assets/*', async (req, res) => {
     }
     
     // Pass through all relevant headers from the original response
+    // Note: We DON'T pass content-encoding or content-length because response.buffer() 
+    // automatically decompresses the response, so we're sending uncompressed data
     const headersToPass = [
       'content-type',
-      'content-length',
-      'content-encoding',
       'cache-control',
       'etag',
       'last-modified',
@@ -191,7 +191,7 @@ app.get('/_assets/*', async (req, res) => {
       }
     });
     
-    // Stream the response
+    // Stream the response - buffer() automatically handles decompression
     const buffer = await response.buffer();
     res.send(buffer);
   } catch (error) {
@@ -225,10 +225,10 @@ app.get('/assets/*', async (req, res) => {
     }
     
     // Pass through all relevant headers from the original response
+    // Note: We DON'T pass content-encoding or content-length because response.buffer() 
+    // automatically decompresses the response, so we're sending uncompressed data
     const headersToPass = [
       'content-type',
-      'content-length',
-      'content-encoding',
       'cache-control',
       'etag',
       'last-modified',
@@ -251,7 +251,7 @@ app.get('/assets/*', async (req, res) => {
       }
     });
     
-    // Stream the response
+    // Stream the response - buffer() automatically handles decompression
     const buffer = await response.buffer();
     res.send(buffer);
   } catch (error) {
@@ -304,10 +304,10 @@ app.get('/proxy/asset', async (req, res) => {
     }
     
     // Pass through all relevant headers from the original response
+    // Note: We DON'T pass content-encoding or content-length because response.buffer() 
+    // automatically decompresses the response, so we're sending uncompressed data
     const headersToPass = [
       'content-type',
-      'content-length',
-      'content-encoding',
       'cache-control',
       'etag',
       'last-modified',
@@ -327,7 +327,7 @@ app.get('/proxy/asset', async (req, res) => {
       }
     });
     
-    // Stream the response
+    // Stream the response - buffer() automatically handles decompression
     const buffer = await response.buffer();
     res.send(buffer);
   } catch (error) {
