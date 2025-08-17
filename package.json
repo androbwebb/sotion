@@ -9,9 +9,12 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "node-fetch": "^3.3.2",
+    "@notionhq/client": "^4.0.2",
     "cheerio": "^1.0.0-rc.12",
-    "nanoid": "^5.0.4"
+    "dotenv": "^17.2.1",
+    "express": "^4.18.2",
+    "nanoid": "^5.0.4",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.16.3"
   }
 }
