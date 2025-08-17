@@ -11,7 +11,8 @@ import {
   deleteMapping,
   getHeadConfigs,
   saveHeadConfigs,
-  autoDiscoverFromEnv
+  autoDiscoverFromEnv,
+  recordTracking
 } from './database.js';
 import { initNotionClient, autoDiscoverViaAPI } from './notion-api.js';
 
@@ -20,6 +21,7 @@ const PORT = process.env.PORT || 3000;
 
 // Fallback in-memory storage if database is not available
 const fallbackUrlMap = new Map();
+const fallbackTracking = new Map();
 let headConfig = { globalSnippets: [], pageSpecificSnippets: {} };
 let usingDatabase = true;
 
@@ -351,6 +353,29 @@ app.get('/p/:id', async (req, res) => {
     return res.status(404).send('Page not found');
   }
   
+  // Record page view tracking
+  if (usingDatabase) {
+    await recordTracking(id, 'page', {
+      userAgent: req.get('user-agent'),
+      ip: req.ip || req.connection.remoteAddress,
+      referer: req.get('referer'),
+      pageId: id
+    });
+  } else {
+    // Fallback tracking
+    if (!fallbackTracking.has(id)) {
+      fallbackTracking.set(id, { page: [] });
+    }
+    const tracking = fallbackTracking.get(id);
+    if (!tracking.page) tracking.page = [];
+    tracking.page.push({
+      timestamp: new Date().toISOString(),
+      userAgent: req.get('user-agent'),
+      ip: req.ip || req.connection.remoteAddress,
+      referer: req.get('referer')
+    });
+  }
+  
   try {
     // Fetch the Notion page
     const response = await fetch(notionUrl);
@@ -592,6 +617,52 @@ app.get('/', async (req, res) => {
   });
 });
 
+// Tracking pixel endpoint
+app.get('/pixel/:name', async (req, res) => {
+  const { name } = req.params;
+  const timestamp = new Date().toISOString();
+  
+  // Record email open
+  if (usingDatabase) {
+    await recordTracking(name, 'email', {
+      userAgent: req.get('user-agent'),
+      ip: req.ip || req.connection.remoteAddress,
+      referer: req.get('referer')
+    });
+  } else {
+    // Fallback tracking
+    if (!fallbackTracking.has(name)) {
+      fallbackTracking.set(name, { email: [] });
+    }
+    const tracking = fallbackTracking.get(name);
+    if (!tracking.email) tracking.email = [];
+    tracking.email.push({
+      timestamp,
+      userAgent: req.get('user-agent'),
+      ip: req.ip || req.connection.remoteAddress,
+      referer: req.get('referer')
+    });
+  }
+  
+  console.log(`Email pixel opened: ${name} at ${timestamp}`);
+  
+  // Return a transparent 1x1 pixel GIF
+  const pixel = Buffer.from(
+    'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+    'base64'
+  );
+  
+  res.writeHead(200, {
+    'Content-Type': 'image/gif',
+    'Content-Length': pixel.length,
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  
+  res.end(pixel);
+});
+
 // Start server
 app.listen(PORT, async () => {
   await initialize();
@@ -602,4 +673,8 @@ app.listen(PORT, async () => {
     console.log(`Root page configured: ${process.env.ROOT_NOTION_PAGE}`);
     console.log(`Visit http://localhost:${PORT}/ to view your Notion site`);
   }
+  
+  console.log('\nTracking:');
+  console.log('GET /pixel/:name - Email tracking pixel');
+  console.log('Page views automatically tracked on /p/:id');
 });
