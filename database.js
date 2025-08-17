@@ -30,6 +30,26 @@ export async function initDatabase() {
       )
     `);
     
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tracking (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        type VARCHAR(10) NOT NULL CHECK (type IN ('email', 'page')),
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        user_agent TEXT,
+        ip VARCHAR(45),
+        referer TEXT,
+        page_id VARCHAR(10),
+        FOREIGN KEY (page_id) REFERENCES url_mappings(id) ON DELETE CASCADE
+      )
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_tracking_name ON tracking(name);
+      CREATE INDEX IF NOT EXISTS idx_tracking_type ON tracking(type);
+      CREATE INDEX IF NOT EXISTS idx_tracking_timestamp ON tracking(timestamp);
+    `);
+    
     console.log('Database tables initialized');
   } catch (error) {
     console.error('Database initialization error:', error);
@@ -132,6 +152,109 @@ export async function saveHeadConfigs(globalSnippets = [], pageSpecificSnippets 
   } catch (error) {
     console.error('Error saving head configs:', error);
     return false;
+  }
+}
+
+export async function recordTracking(name, type, { userAgent, ip, referer, pageId } = {}) {
+  try {
+    await pool.query(
+      `INSERT INTO tracking (name, type, user_agent, ip, referer, page_id) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [name, type, userAgent, ip, referer, pageId]
+    );
+    return true;
+  } catch (error) {
+    console.error('Error recording tracking:', error);
+    return false;
+  }
+}
+
+export async function getTrackingStats(name = null) {
+  try {
+    let query;
+    let params;
+    
+    if (name) {
+      query = `
+        SELECT 
+          name,
+          type,
+          MIN(timestamp) as first_opened,
+          MAX(timestamp) as last_opened,
+          COUNT(*) as total_opens,
+          JSON_AGG(
+            JSON_BUILD_OBJECT(
+              'timestamp', timestamp,
+              'type', type,
+              'userAgent', user_agent,
+              'ip', ip,
+              'referer', referer,
+              'pageId', page_id
+            ) ORDER BY timestamp DESC
+          ) as opens
+        FROM tracking 
+        WHERE name = $1
+        GROUP BY name, type
+      `;
+      params = [name];
+    } else {
+      query = `
+        SELECT 
+          name,
+          type,
+          MIN(timestamp) as first_opened,
+          MAX(timestamp) as last_opened,
+          COUNT(*) as total_opens,
+          JSON_AGG(
+            JSON_BUILD_OBJECT(
+              'timestamp', timestamp,
+              'type', type,
+              'userAgent', user_agent,
+              'ip', ip,
+              'referer', referer,
+              'pageId', page_id
+            ) ORDER BY timestamp DESC
+          ) as opens
+        FROM tracking 
+        GROUP BY name, type
+        ORDER BY MAX(timestamp) DESC
+      `;
+      params = [];
+    }
+    
+    const result = await pool.query(query, params);
+    
+    if (name && result.rows.length > 0) {
+      // Return single record for specific name
+      const row = result.rows[0];
+      return {
+        firstOpened: row.first_opened,
+        lastOpened: row.last_opened,
+        totalOpens: parseInt(row.total_opens),
+        type: row.type,
+        opens: row.opens
+      };
+    } else if (!name) {
+      // Return all records grouped by name
+      const stats = {};
+      result.rows.forEach(row => {
+        if (!stats[row.name]) {
+          stats[row.name] = {};
+        }
+        stats[row.name][row.type] = {
+          firstOpened: row.first_opened,
+          lastOpened: row.last_opened,
+          totalOpens: parseInt(row.total_opens),
+          opens: row.opens
+        };
+      });
+      return stats;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting tracking stats:', error);
+    return null;
   }
 }
 
