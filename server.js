@@ -10,6 +10,9 @@ const PORT = process.env.PORT || 3000;
 // Store mapping of obfuscated IDs to actual Notion URLs
 const urlMap = new Map();
 
+// Store email tracking data
+const emailOpens = new Map();
+
 // Load config for HEAD snippets
 let headConfig = {};
 try {
@@ -87,7 +90,7 @@ app.get('/p/:id', async (req, res) => {
 });
 
 // Endpoint to update HEAD snippets configuration
-app.post('/config', (req, res) => {
+app.post('/config', async (req, res) => {
   const { globalSnippets, pageSpecificSnippets } = req.body;
   
   if (globalSnippets) {
@@ -122,6 +125,76 @@ app.get('/list', (req, res) => {
   res.json(entries);
 });
 
+// Tracking pixel endpoint
+app.get('/pixel/:name', (req, res) => {
+  const { name } = req.params;
+  const timestamp = new Date().toISOString();
+  
+  // Get or create tracking record for this name
+  if (!emailOpens.has(name)) {
+    emailOpens.set(name, {
+      firstOpened: timestamp,
+      opens: []
+    });
+  }
+  
+  // Record this open
+  const trackingData = emailOpens.get(name);
+  trackingData.opens.push({
+    timestamp,
+    userAgent: req.get('user-agent'),
+    ip: req.ip || req.connection.remoteAddress,
+    referer: req.get('referer')
+  });
+  trackingData.lastOpened = timestamp;
+  trackingData.totalOpens = trackingData.opens.length;
+  
+  console.log(`Email pixel opened: ${name} at ${timestamp}`);
+  
+  // Return a transparent 1x1 pixel GIF
+  const pixel = Buffer.from(
+    'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+    'base64'
+  );
+  
+  res.writeHead(200, {
+    'Content-Type': 'image/gif',
+    'Content-Length': pixel.length,
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  
+  res.end(pixel);
+});
+
+// Get tracking stats for a specific pixel
+app.get('/stats/:name', (req, res) => {
+  const { name } = req.params;
+  
+  if (!emailOpens.has(name)) {
+    return res.status(404).json({ error: 'No tracking data found for this name' });
+  }
+  
+  const data = emailOpens.get(name);
+  res.json(data);
+});
+
+// Get all tracking stats
+app.get('/stats', (req, res) => {
+  const stats = {};
+  emailOpens.forEach((value, key) => {
+    stats[key] = {
+      firstOpened: value.firstOpened,
+      lastOpened: value.lastOpened,
+      totalOpens: value.totalOpens,
+      opens: value.opens
+    };
+  });
+  
+  res.json(stats);
+});
+
 app.listen(PORT, () => {
   console.log(`Notion proxy server running on http://localhost:${PORT}`);
   console.log('\nEndpoints:');
@@ -129,4 +202,8 @@ app.listen(PORT, () => {
   console.log('GET /p/:id - Access proxied Notion page');
   console.log('POST /config - Update HEAD snippet configuration');
   console.log('GET /list - List all registered URLs');
+  console.log('\nEmail Tracking Endpoints:');
+  console.log('GET /pixel/:name - Tracking pixel (use in img src)');
+  console.log('GET /stats/:name - Get stats for specific pixel');
+  console.log('GET /stats - Get all tracking stats');
 });
