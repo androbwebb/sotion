@@ -30,6 +30,7 @@ export async function initDatabase() {
       )
     `);
     
+    // Create tracking table from main branch
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tracking (
         id SERIAL PRIMARY KEY,
@@ -48,6 +49,25 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_tracking_name ON tracking(name);
       CREATE INDEX IF NOT EXISTS idx_tracking_type ON tracking(type);
       CREATE INDEX IF NOT EXISTS idx_tracking_timestamp ON tracking(timestamp);
+    `);
+    
+    // Create asset cache table from our branch
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS asset_cache (
+        url TEXT PRIMARY KEY,
+        content_type VARCHAR(255),
+        content BYTEA,
+        headers JSONB,
+        cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '5 minutes'),
+        hit_count INTEGER DEFAULT 0
+      )
+    `);
+    
+    // Create index for faster expiry checks
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_asset_cache_expires 
+      ON asset_cache(expires_at)
     `);
     
     console.log('Database tables initialized');
@@ -278,6 +298,92 @@ export async function autoDiscoverFromEnv() {
         console.log(`Auto-registered: ${url} -> ${id}`);
       }
     }
+  }
+}
+
+// Asset cache functions
+export async function getCachedAsset(url) {
+  try {
+    // First clean up expired entries
+    await pool.query('DELETE FROM asset_cache WHERE expires_at < CURRENT_TIMESTAMP');
+    
+    const result = await pool.query(
+      `SELECT content_type, content, headers 
+       FROM asset_cache 
+       WHERE url = $1 AND expires_at > CURRENT_TIMESTAMP`,
+      [url]
+    );
+    
+    if (result.rows.length > 0) {
+      // Update hit count
+      await pool.query(
+        'UPDATE asset_cache SET hit_count = hit_count + 1 WHERE url = $1',
+        [url]
+      );
+      
+      return {
+        contentType: result.rows[0].content_type,
+        content: result.rows[0].content,
+        headers: result.rows[0].headers,
+        cached: true
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting cached asset:', error);
+    return null;
+  }
+}
+
+export async function setCachedAsset(url, contentType, content, headers) {
+  try {
+    await pool.query(
+      `INSERT INTO asset_cache (url, content_type, content, headers, expires_at) 
+       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + INTERVAL '5 minutes')
+       ON CONFLICT (url) DO UPDATE SET 
+         content_type = $2,
+         content = $3,
+         headers = $4,
+         cached_at = CURRENT_TIMESTAMP,
+         expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes'`,
+      [url, contentType, content, JSON.stringify(headers)]
+    );
+    
+    return true;
+  } catch (error) {
+    console.error('Error caching asset:', error);
+    return false;
+  }
+}
+
+export async function getCacheStats() {
+  try {
+    const stats = await pool.query(`
+      SELECT 
+        COUNT(*) as total_cached,
+        SUM(hit_count) as total_hits,
+        SUM(LENGTH(content)) as total_size,
+        MIN(cached_at) as oldest_cache,
+        MAX(cached_at) as newest_cache
+      FROM asset_cache
+      WHERE expires_at > CURRENT_TIMESTAMP
+    `);
+    
+    return stats.rows[0];
+  } catch (error) {
+    console.error('Error getting cache stats:', error);
+    return null;
+  }
+}
+
+export async function clearCache() {
+  try {
+    const result = await pool.query('DELETE FROM asset_cache');
+    return result.rowCount;
+  } catch (error) {
+    console.error('Error clearing cache:', error);
+    return 0;
   }
 }
 

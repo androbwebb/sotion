@@ -12,7 +12,11 @@ import {
   getHeadConfigs,
   saveHeadConfigs,
   autoDiscoverFromEnv,
-  recordTracking
+  recordTracking,
+  getCachedAsset,
+  setCachedAsset,
+  getCacheStats,
+  clearCache
 } from './database.js';
 import { initNotionClient, autoDiscoverViaAPI } from './notion-api.js';
 
@@ -148,6 +152,35 @@ app.get('/_assets/*', async (req, res) => {
   const notionAssetUrl = `https://www.notion.so${assetPath}`;
   
   try {
+    // Check cache first if database is available
+    if (usingDatabase) {
+      const cached = await getCachedAsset(notionAssetUrl);
+      if (cached) {
+        console.log(`Cache HIT: ${assetPath}`);
+        
+        // Set content type
+        if (cached.contentType) {
+          res.set('Content-Type', cached.contentType);
+        }
+        
+        // Set cached headers
+        if (cached.headers) {
+          Object.entries(cached.headers).forEach(([key, value]) => {
+            if (key !== 'content-encoding' && key !== 'content-length') {
+              res.set(key, value);
+            }
+          });
+        }
+        
+        // Add cache hit header
+        res.set('X-Cache', 'HIT');
+        
+        return res.send(cached.content);
+      }
+    }
+    
+    console.log(`Cache MISS: ${assetPath}`);
+    
     const response = await fetch(notionAssetUrl);
     
     if (!response.ok) {
@@ -166,11 +199,9 @@ app.get('/_assets/*', async (req, res) => {
       }
     }
     
-    // Pass through all relevant headers from the original response
-    // Note: We DON'T pass content-encoding or content-length because response.buffer() 
-    // automatically decompresses the response, so we're sending uncompressed data
+    // Collect headers to pass through and save
+    const headersToSave = {};
     const headersToPass = [
-      'content-type',
       'cache-control',
       'etag',
       'last-modified',
@@ -184,17 +215,28 @@ app.get('/_assets/*', async (req, res) => {
     headersToPass.forEach(header => {
       const value = response.headers.get(header);
       if (value) {
-        // Special handling for content-type if we overrode it
-        if (header === 'content-type' && contentType !== response.headers.get('content-type')) {
-          res.set(header, contentType);
-        } else {
-          res.set(header, value);
-        }
+        headersToSave[header] = value;
+        res.set(header, value);
       }
     });
     
+    // Set content type
+    if (contentType) {
+      res.set('Content-Type', contentType);
+    }
+    
+    // Add cache miss header
+    res.set('X-Cache', 'MISS');
+    
     // Stream the response - buffer() automatically handles decompression
     const buffer = await response.buffer();
+    
+    // Cache the asset if database is available
+    if (usingDatabase) {
+      await setCachedAsset(notionAssetUrl, contentType, buffer, headersToSave);
+      console.log(`Cached asset: ${assetPath}`);
+    }
+    
     res.send(buffer);
   } catch (error) {
     console.error('Error fetching asset:', error);
@@ -208,6 +250,35 @@ app.get('/assets/*', async (req, res) => {
   const notionAssetUrl = `https://www.notion.so${assetPath}`;
   
   try {
+    // Check cache first if database is available
+    if (usingDatabase) {
+      const cached = await getCachedAsset(notionAssetUrl);
+      if (cached) {
+        console.log(`Cache HIT: ${req.path}`);
+        
+        // Set content type
+        if (cached.contentType) {
+          res.set('Content-Type', cached.contentType);
+        }
+        
+        // Set cached headers
+        if (cached.headers) {
+          Object.entries(cached.headers).forEach(([key, value]) => {
+            if (key !== 'content-encoding' && key !== 'content-length') {
+              res.set(key, value);
+            }
+          });
+        }
+        
+        // Add cache hit header
+        res.set('X-Cache', 'HIT');
+        
+        return res.send(cached.content);
+      }
+    }
+    
+    console.log(`Cache MISS: ${req.path}`);
+    
     const response = await fetch(notionAssetUrl);
     
     if (!response.ok) {
@@ -226,11 +297,9 @@ app.get('/assets/*', async (req, res) => {
       }
     }
     
-    // Pass through all relevant headers from the original response
-    // Note: We DON'T pass content-encoding or content-length because response.buffer() 
-    // automatically decompresses the response, so we're sending uncompressed data
+    // Collect headers to save
+    const headersToSave = {};
     const headersToPass = [
-      'content-type',
       'cache-control',
       'etag',
       'last-modified',
@@ -244,17 +313,28 @@ app.get('/assets/*', async (req, res) => {
     headersToPass.forEach(header => {
       const value = response.headers.get(header);
       if (value) {
-        // Special handling for content-type if we overrode it
-        if (header === 'content-type' && contentType !== response.headers.get('content-type')) {
-          res.set(header, contentType);
-        } else {
-          res.set(header, value);
-        }
+        headersToSave[header] = value;
+        res.set(header, value);
       }
     });
     
+    // Set content type
+    if (contentType) {
+      res.set('Content-Type', contentType);
+    }
+    
+    // Add cache miss header
+    res.set('X-Cache', 'MISS');
+    
     // Stream the response - buffer() automatically handles decompression
     const buffer = await response.buffer();
+    
+    // Cache the asset if database is available
+    if (usingDatabase) {
+      await setCachedAsset(notionAssetUrl, contentType, buffer, headersToSave);
+      console.log(`Cached asset: ${req.path}`);
+    }
+    
     res.send(buffer);
   } catch (error) {
     console.error('Error fetching asset:', error);
@@ -287,6 +367,35 @@ app.get('/proxy/asset', async (req, res) => {
       return res.status(403).send('Domain not allowed');
     }
     
+    // Check cache first if database is available
+    if (usingDatabase) {
+      const cached = await getCachedAsset(assetUrl);
+      if (cached) {
+        console.log(`Cache HIT: External asset`);
+        
+        // Set content type
+        if (cached.contentType) {
+          res.set('Content-Type', cached.contentType);
+        }
+        
+        // Set cached headers
+        if (cached.headers) {
+          Object.entries(cached.headers).forEach(([key, value]) => {
+            if (key !== 'content-encoding' && key !== 'content-length') {
+              res.set(key, value);
+            }
+          });
+        }
+        
+        // Add cache hit header
+        res.set('X-Cache', 'HIT');
+        
+        return res.send(cached.content);
+      }
+    }
+    
+    console.log(`Cache MISS: External asset`);
+    
     const response = await fetch(assetUrl);
     
     if (!response.ok) {
@@ -305,11 +414,9 @@ app.get('/proxy/asset', async (req, res) => {
       }
     }
     
-    // Pass through all relevant headers from the original response
-    // Note: We DON'T pass content-encoding or content-length because response.buffer() 
-    // automatically decompresses the response, so we're sending uncompressed data
+    // Collect headers to save
+    const headersToSave = {};
     const headersToPass = [
-      'content-type',
       'cache-control',
       'etag',
       'last-modified',
@@ -320,17 +427,28 @@ app.get('/proxy/asset', async (req, res) => {
     headersToPass.forEach(header => {
       const value = response.headers.get(header);
       if (value) {
-        // Special handling for content-type if we overrode it
-        if (header === 'content-type' && contentType !== response.headers.get('content-type')) {
-          res.set(header, contentType);
-        } else {
-          res.set(header, value);
-        }
+        headersToSave[header] = value;
+        res.set(header, value);
       }
     });
     
+    // Set content type
+    if (contentType) {
+      res.set('Content-Type', contentType);
+    }
+    
+    // Add cache miss header
+    res.set('X-Cache', 'MISS');
+    
     // Stream the response - buffer() automatically handles decompression
     const buffer = await response.buffer();
+    
+    // Cache the asset if database is available
+    if (usingDatabase) {
+      await setCachedAsset(assetUrl, contentType, buffer, headersToSave);
+      console.log(`Cached external asset`);
+    }
+    
     res.send(buffer);
   } catch (error) {
     console.error('Error fetching external asset:', error);
@@ -377,6 +495,20 @@ app.get('/p/:id', async (req, res) => {
   }
   
   try {
+    // Check cache first for HTML pages
+    const cacheKey = `page:${id}`;
+    if (usingDatabase) {
+      const cached = await getCachedAsset(cacheKey);
+      if (cached) {
+        console.log(`Cache HIT: Page ${id}`);
+        res.set('Content-Type', 'text/html; charset=utf-8');
+        res.set('X-Cache', 'HIT');
+        return res.send(cached.content);
+      }
+    }
+    
+    console.log(`Cache MISS: Page ${id}`);
+    
     // Fetch the Notion page
     const response = await fetch(notionUrl);
     const html = await response.text();
@@ -518,8 +650,22 @@ app.get('/p/:id', async (req, res) => {
       });
     }
     
+    // Get the modified HTML
+    const modifiedHtml = $.html();
+    
+    // Cache the modified HTML if database is available
+    if (usingDatabase) {
+      const cacheKey = `page:${id}`;
+      await setCachedAsset(cacheKey, 'text/html; charset=utf-8', Buffer.from(modifiedHtml), {});
+      console.log(`Cached page: ${id}`);
+    }
+    
+    // Add cache miss header
+    res.set('X-Cache', 'MISS');
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    
     // Send modified HTML
-    res.send($.html());
+    res.send(modifiedHtml);
   } catch (error) {
     console.error('Error fetching Notion page:', error);
     res.status(500).send('Error loading page');
@@ -562,6 +708,56 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     usingDatabase,
     mappingsCount: usingDatabase ? 'check /list endpoint' : fallbackUrlMap.size
+  });
+});
+
+// Cache statistics endpoint
+app.get('/cache/stats', async (req, res) => {
+  if (!usingDatabase) {
+    return res.json({ 
+      message: 'Cache not available without database',
+      usingDatabase: false 
+    });
+  }
+  
+  const stats = await getCacheStats();
+  if (stats) {
+    res.json({
+      totalCached: parseInt(stats.total_cached) || 0,
+      totalHits: parseInt(stats.total_hits) || 0,
+      totalSizeBytes: parseInt(stats.total_size) || 0,
+      totalSizeMB: ((parseInt(stats.total_size) || 0) / (1024 * 1024)).toFixed(2),
+      oldestCache: stats.oldest_cache,
+      newestCache: stats.newest_cache,
+      cacheMaxAge: '5 minutes'
+    });
+  } else {
+    res.status(500).json({ error: 'Failed to get cache stats' });
+  }
+});
+
+// Clear cache endpoint (protected with simple auth if CACHE_ADMIN_KEY is set)
+app.post('/cache/clear', async (req, res) => {
+  // Simple auth check if CACHE_ADMIN_KEY is configured
+  const adminKey = process.env.CACHE_ADMIN_KEY;
+  if (adminKey) {
+    const providedKey = req.headers['x-admin-key'] || req.query.key;
+    if (providedKey !== adminKey) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  
+  if (!usingDatabase) {
+    return res.json({ 
+      message: 'Cache not available without database',
+      usingDatabase: false 
+    });
+  }
+  
+  const clearedCount = await clearCache();
+  res.json({ 
+    message: 'Cache cleared',
+    entriesCleared: clearedCount 
   });
 });
 
