@@ -738,7 +738,7 @@ app.get('/', async (req, res) => {
       'POST /cache/clear': 'Clear the cache'
     },
     database: usingDatabase ? 'PostgreSQL' : 'In-memory (not persistent)',
-    rootPage: rootPage ? 'Not configured' : 'Not configured'
+    rootPage: rootPage ? 'Configured' : 'Not configured'
   });
 });
 
