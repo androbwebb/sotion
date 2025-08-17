@@ -110,6 +110,186 @@ app.post('/register', async (req, res) => {
   });
 });
 
+// Helper function to detect MIME type from path
+function getMimeType(path) {
+  if (path.endsWith('.js') || path.endsWith('.mjs')) {
+    return 'application/javascript';
+  } else if (path.endsWith('.css')) {
+    return 'text/css';
+  } else if (path.endsWith('.png')) {
+    return 'image/png';
+  } else if (path.endsWith('.jpg') || path.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  } else if (path.endsWith('.gif')) {
+    return 'image/gif';
+  } else if (path.endsWith('.svg')) {
+    return 'image/svg+xml';
+  } else if (path.endsWith('.ico')) {
+    return 'image/x-icon';
+  } else if (path.endsWith('.woff')) {
+    return 'font/woff';
+  } else if (path.endsWith('.woff2')) {
+    return 'font/woff2';
+  } else if (path.endsWith('.ttf')) {
+    return 'font/ttf';
+  } else if (path.endsWith('.json')) {
+    return 'application/json';
+  } else if (path.endsWith('.xml')) {
+    return 'application/xml';
+  }
+  return null;
+}
+
+// Proxy for Notion assets with underscore prefix
+app.get('/_assets/*', async (req, res) => {
+  const assetPath = req.path;
+  const notionAssetUrl = `https://www.notion.so${assetPath}`;
+  
+  try {
+    const response = await fetch(notionAssetUrl);
+    
+    if (!response.ok) {
+      return res.status(response.status).send(`Asset not found: ${response.statusText}`);
+    }
+    
+    // Detect content type from the file extension or response headers
+    let contentType = response.headers.get('content-type');
+    if (!contentType || contentType === 'text/html') {
+      // Override incorrect MIME types
+      const detectedType = getMimeType(assetPath);
+      if (detectedType) {
+        contentType = detectedType;
+      }
+    }
+    
+    // Set proper headers
+    if (contentType) {
+      res.set('Content-Type', contentType);
+    }
+    
+    // Copy other important headers
+    ['cache-control', 'etag', 'last-modified', 'access-control-allow-origin'].forEach(header => {
+      const value = response.headers.get(header);
+      if (value) {
+        res.set(header, value);
+      }
+    });
+    
+    // Stream the response
+    const buffer = await response.buffer();
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error fetching asset:', error);
+    res.status(500).send('Error loading asset');
+  }
+});
+
+// Proxy for Notion assets without underscore
+app.get('/assets/*', async (req, res) => {
+  const assetPath = req.path.replace('/assets/', '/_assets/');
+  const notionAssetUrl = `https://www.notion.so${assetPath}`;
+  
+  try {
+    const response = await fetch(notionAssetUrl);
+    
+    if (!response.ok) {
+      return res.status(response.status).send(`Asset not found: ${response.statusText}`);
+    }
+    
+    // Detect content type from the file extension or response headers
+    let contentType = response.headers.get('content-type');
+    if (!contentType || contentType === 'text/html') {
+      // Override incorrect MIME types
+      const detectedType = getMimeType(req.path);
+      if (detectedType) {
+        contentType = detectedType;
+      }
+    }
+    
+    // Set proper headers
+    if (contentType) {
+      res.set('Content-Type', contentType);
+    }
+    
+    // Copy other important headers
+    ['cache-control', 'etag', 'last-modified', 'access-control-allow-origin'].forEach(header => {
+      const value = response.headers.get(header);
+      if (value) {
+        res.set(header, value);
+      }
+    });
+    
+    // Stream the response
+    const buffer = await response.buffer();
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error fetching asset:', error);
+    res.status(500).send('Error loading asset');
+  }
+});
+
+// Proxy for external Notion CDN assets
+app.get('/proxy/asset', async (req, res) => {
+  const { url } = req.query;
+  
+  if (!url) {
+    return res.status(400).send('URL parameter required');
+  }
+  
+  try {
+    // Decode the URL
+    const assetUrl = decodeURIComponent(url);
+    
+    // Only allow specific CDN domains for security
+    const allowedDomains = [
+      'amazonaws.com',
+      'notion.so',
+      'notion.site',
+      'notion.com'
+    ];
+    
+    const urlObj = new URL(assetUrl);
+    if (!allowedDomains.some(domain => urlObj.hostname.includes(domain))) {
+      return res.status(403).send('Domain not allowed');
+    }
+    
+    const response = await fetch(assetUrl);
+    
+    if (!response.ok) {
+      return res.status(response.status).send(`Asset not found: ${response.statusText}`);
+    }
+    
+    // Detect content type
+    let contentType = response.headers.get('content-type');
+    if (!contentType || contentType === 'text/html') {
+      const detectedType = getMimeType(assetUrl);
+      if (detectedType) {
+        contentType = detectedType;
+      }
+    }
+    
+    // Set proper headers
+    if (contentType) {
+      res.set('Content-Type', contentType);
+    }
+    
+    // Copy other important headers
+    ['cache-control', 'etag', 'last-modified'].forEach(header => {
+      const value = response.headers.get(header);
+      if (value) {
+        res.set(header, value);
+      }
+    });
+    
+    // Stream the response
+    const buffer = await response.buffer();
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error fetching external asset:', error);
+    res.status(500).send('Error loading asset');
+  }
+});
+
 // Proxy endpoint with obfuscated URL
 app.get('/p/:id', async (req, res) => {
   const { id } = req.params;
@@ -132,6 +312,89 @@ app.get('/p/:id', async (req, res) => {
     
     // Parse HTML with Cheerio
     const $ = cheerio.load(html);
+    
+    // Rewrite asset URLs to use our proxy
+    // Handle script tags
+    $('script[src]').each((i, elem) => {
+      const src = $(elem).attr('src');
+      if (src) {
+        if (src.includes('notion.so/_assets/') || src.includes('notion.site/_assets/')) {
+          // Extract just the _assets path
+          const assetPath = src.substring(src.indexOf('/_assets/'));
+          $(elem).attr('src', assetPath);
+        } else if (src.includes('notion.so/assets/') || src.includes('notion.site/assets/')) {
+          // Extract just the assets path (without underscore)
+          const assetPath = src.substring(src.indexOf('/assets/'));
+          $(elem).attr('src', assetPath);
+        } else if (src.startsWith('https://') && (src.includes('amazonaws.com') || src.includes('notion'))) {
+          // Proxy external CDN assets
+          $(elem).attr('src', `/proxy/asset?url=${encodeURIComponent(src)}`);
+        } else if (src.startsWith('/_assets/') || src.startsWith('/assets/')) {
+          // Already relative, leave as is
+        }
+      }
+    });
+    
+    // Handle link tags (CSS)
+    $('link[href]').each((i, elem) => {
+      const href = $(elem).attr('href');
+      if (href) {
+        if (href.includes('notion.so/_assets/') || href.includes('notion.site/_assets/')) {
+          // Extract just the _assets path
+          const assetPath = href.substring(href.indexOf('/_assets/'));
+          $(elem).attr('href', assetPath);
+        } else if (href.includes('notion.so/assets/') || href.includes('notion.site/assets/')) {
+          // Extract just the assets path (without underscore)
+          const assetPath = href.substring(href.indexOf('/assets/'));
+          $(elem).attr('href', assetPath);
+        } else if (href.startsWith('https://') && (href.includes('amazonaws.com') || href.includes('notion'))) {
+          // Proxy external CDN assets
+          $(elem).attr('href', `/proxy/asset?url=${encodeURIComponent(href)}`);
+        } else if (href.startsWith('/_assets/') || href.startsWith('/assets/')) {
+          // Already relative, leave as is
+        }
+      }
+    });
+    
+    // Handle image tags
+    $('img[src]').each((i, elem) => {
+      const src = $(elem).attr('src');
+      if (src) {
+        if (src.includes('notion.so/_assets/') || src.includes('notion.site/_assets/')) {
+          // Extract just the _assets path
+          const assetPath = src.substring(src.indexOf('/_assets/'));
+          $(elem).attr('src', assetPath);
+        } else if (src.includes('notion.so/assets/') || src.includes('notion.site/assets/')) {
+          // Extract just the assets path (without underscore)
+          const assetPath = src.substring(src.indexOf('/assets/'));
+          $(elem).attr('src', assetPath);
+        } else if (src.startsWith('https://') && (src.includes('amazonaws.com') || src.includes('notion'))) {
+          // Proxy external CDN assets
+          $(elem).attr('src', `/proxy/asset?url=${encodeURIComponent(src)}`);
+        } else if (src.startsWith('/_assets/') || src.startsWith('/assets/')) {
+          // Already relative, leave as is
+        }
+      }
+    });
+    
+    // Handle inline styles with url() references
+    $('[style]').each((i, elem) => {
+      const style = $(elem).attr('style');
+      if (style && style.includes('url(')) {
+        let newStyle = style;
+        // Match url() patterns
+        const urlMatches = style.match(/url\(['"]?(https?:\/\/[^'"\)]+)['"]?\)/g);
+        if (urlMatches) {
+          urlMatches.forEach(match => {
+            const url = match.match(/url\(['"]?(https?:\/\/[^'"\)]+)['"]?\)/)[1];
+            if (url && (url.includes('amazonaws.com') || url.includes('notion'))) {
+              newStyle = newStyle.replace(match, `url('/proxy/asset?url=${encodeURIComponent(url)}')`);
+            }
+          });
+          $(elem).attr('style', newStyle);
+        }
+      }
+    });
     
     // Auto-discover and register linked Notion pages
     if (process.env.AUTO_DISCOVER_LINKS === 'true') {
