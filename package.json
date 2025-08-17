@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "migrate": "node migrate.js up",
+    "migrate:status": "node migrate.js status",
+    "migrate:rollback": "node migrate.js rollback"
   },
   "dependencies": {
     "@notionhq/client": "^4.0.2",

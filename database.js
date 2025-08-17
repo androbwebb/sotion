@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { nanoid } from 'nanoid';
+import { runMigrations, getMigrationStatus } from './migrations.js';
 
 const { Pool } = pg;
 
@@ -10,70 +11,28 @@ const pool = new Pool({
 
 export async function initDatabase() {
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS url_mappings (
-        id VARCHAR(10) PRIMARY KEY,
-        notion_url TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        access_count INTEGER DEFAULT 0,
-        last_accessed TIMESTAMP
-      )
-    `);
+    // Check migration status
+    const status = await getMigrationStatus(pool);
+    console.log('Migration status:', {
+      initialized: status.initialized,
+      applied: status.applied?.length || 0,
+      pending: status.pending?.length || 0
+    });
     
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS head_configs (
-        id SERIAL PRIMARY KEY,
-        config_type VARCHAR(20) NOT NULL,
-        page_id VARCHAR(10),
-        snippet TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+    // Run any pending migrations
+    const migrationsRun = await runMigrations(pool);
     
-    // Create tracking table from main branch
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS tracking (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        type VARCHAR(10) NOT NULL CHECK (type IN ('email', 'page')),
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        user_agent TEXT,
-        ip VARCHAR(45),
-        referer TEXT,
-        page_id VARCHAR(10),
-        FOREIGN KEY (page_id) REFERENCES url_mappings(id) ON DELETE CASCADE
-      )
-    `);
+    if (migrationsRun > 0) {
+      console.log(`Database updated with ${migrationsRun} migrations`);
+    } else {
+      console.log('Database schema is up to date');
+    }
     
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_tracking_name ON tracking(name);
-      CREATE INDEX IF NOT EXISTS idx_tracking_type ON tracking(type);
-      CREATE INDEX IF NOT EXISTS idx_tracking_timestamp ON tracking(timestamp);
-    `);
-    
-    // Create asset cache table from our branch
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS asset_cache (
-        url TEXT PRIMARY KEY,
-        content_type VARCHAR(255),
-        content BYTEA,
-        headers JSONB,
-        cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '5 minutes'),
-        hit_count INTEGER DEFAULT 0
-      )
-    `);
-    
-    // Create index for faster expiry checks
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_asset_cache_expires 
-      ON asset_cache(expires_at)
-    `);
-    
-    console.log('Database tables initialized');
+    return true;
   } catch (error) {
     console.error('Database initialization error:', error);
     console.log('Running in fallback mode without database');
+    throw error;
   }
 }
 
