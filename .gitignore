@@ -1,5 +1,7 @@
 node_modules/
 .env
-.DS_Store
 config.json
+urls.json
+pages.json
 *.log
+.DS_Store

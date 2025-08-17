@@ -1,0 +1,8 @@
+[
+  "https://www.notion.so/your-page-id-here",
+  "https://your-workspace.notion.site/Page-Title-abc123",
+  {
+    "id": "custom-id",
+    "url": "https://www.notion.so/another-page"
+  }
+]
